@@ -18,15 +18,15 @@ A dashboard management tool that exports QuickSight dashboards with their depend
 ## Limitations
 
 - Local implementation reviewed; live export and restore were not run.
-- Job polling lacks an overall deadline; restore handling needs coverage for all terminal failure states.
-- S3 backup listing is not paginated, and repeated backups of the same dashboard on the same day use the same object key.
+- Polling has a ten-minute local deadline and handles all documented terminal failure states; timing out does not cancel a remote job.
+- S3 listings are paginated; backup keys use UTC timestamps and random suffixes to prevent same-day overwrites.
 - Environment-specific configuration must be excluded from any public repository.
 
 This is a prototype. Live AWS behavior and production readiness have not been verified.
 
 ## Local setup
 
-Requires Python 3 and AWS credentials configured for an account you are authorized to use. Use a sandbox account with synthetic resources for demonstrations.
+Requires Python 3.10+ and AWS credentials configured for an account you are authorized to use. Use a sandbox account with synthetic resources for demonstrations.
 
 ```sh
 python3 -m venv .venv
@@ -46,4 +46,8 @@ Local configuration, credentials, generated reports, spreadsheets, and asset bun
 
 ## Validation
 
-Python syntax was checked without executing application code. No AWS requests or deployment tests were run. The dependency list is not version-locked.
+Run `python -m unittest -v` for ten offline tests covering failure states, deadline enforcement, throttling, pagination, input validation, and backup keys. No credentials or AWS requests are needed. Dependencies are not version-locked.
+
+See [VALIDATION.md](VALIDATION.md) for the sandbox validation procedure and [the illustrated walkthrough](https://zayan15.github.io/demos.html) for a synthetic example.
+
+AWS status references: [Import jobs](https://docs.aws.amazon.com/quicksight/latest/APIReference/API_DescribeAssetBundleImportJob.html) and [Export jobs](https://docs.aws.amazon.com/quicksight/latest/APIReference/API_DescribeAssetBundleExportJob.html).
