@@ -1,0 +1,6 @@
+{
+  "account_id": "",
+  "region": "us-west-2",
+  "s3_bucket": "",
+  "s3_prefix": "demo-backups/"
+}
