@@ -22,7 +22,7 @@ A dashboard management tool that exports QuickSight dashboards with their depend
 - S3 backup listing is not paginated, and repeated backups of the same dashboard on the same day use the same object key.
 - Environment-specific configuration must be excluded from any public repository.
 
-No production-readiness, deployment, or measured-impact claim is made. Source ownership and permission to publish must be established independently of the folder name. This draft includes no source code, credentials, account values, or employer infrastructure details.
+This is a prototype. Live AWS behavior and production readiness have not been verified.
 
 ## Local setup
 
