@@ -9,6 +9,8 @@ import re
 import requests
 from datetime import datetime
 from urllib.parse import urlparse
+from botocore.config import Config
+from operations import wait_for_job, validate_config, validate_s3_uri, backup_key, list_backups
 
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), 'config.json')
 
@@ -63,8 +65,8 @@ init_config()
 def get_clients():
     c = cfg()
     return {
-        'quicksight': boto3.client('quicksight', region_name=c['region']),
-        's3': boto3.client('s3', region_name=c['region']),
+        'quicksight': boto3.client('quicksight', region_name=c['region'], config=Config(connect_timeout=5, read_timeout=30, retries={'max_attempts': 3, 'mode': 'standard'})),
+        's3': boto3.client('s3', region_name=c['region'], config=Config(connect_timeout=5, read_timeout=30, retries={'max_attempts': 3, 'mode': 'standard'})),
     }
 
 def sanitize_name(name):
@@ -87,15 +89,7 @@ def list_s3_backups():
     c = cfg()
     backups = []
     try:
-        response = clients['s3'].list_objects_v2(Bucket=c['s3_bucket'], Prefix=c['s3_prefix'])
-        for obj in response.get('Contents', []):
-            if obj['Key'].endswith('.qs'):
-                backups.append({
-                    'key': obj['Key'],
-                    'name': obj['Key'].replace(c['s3_prefix'], '').replace('.qs', ''),
-                    'size': obj['Size'],
-                    'modified': obj['LastModified']
-                })
+        backups = list_backups(clients['s3'], c['s3_bucket'], c['s3_prefix'])
     except Exception as e:
         st.error(f"Error listing S3 backups: {e}")
     return backups
@@ -122,34 +116,12 @@ def export_dashboard(dashboard_id, dashboard_name):
         progress_bar.progress(25)
         status_text.text("Waiting for export to complete...")
         
-        wait_time = 5
-        max_wait = 60
-        while True:
-            try:
-                response = clients['quicksight'].describe_asset_bundle_export_job(
-                    AwsAccountId=c['account_id'],
-                    AssetBundleExportJobId=job_id
-                )
-                
-                status = response['JobStatus']
-                if status == 'FAILED':
-                    st.error("Export job failed!")
-                    return False
-                elif status in ['COMPLETED', 'SUCCESSFUL']:
-                    break
-                    
-                status_text.text(f"Export status: {status}... waiting {wait_time}s")
-                time.sleep(wait_time)
-                wait_time = min(wait_time * 1.2, max_wait)
-                
-            except Exception as api_error:
-                if 'ThrottlingException' in str(api_error):
-                    status_text.text(f"Rate limited, waiting {wait_time}s...")
-                    time.sleep(wait_time)
-                    wait_time = min(wait_time * 2, max_wait)
-                else:
-                    raise api_error
-        
+        response = wait_for_job(
+            lambda: clients['quicksight'].describe_asset_bundle_export_job(
+                AwsAccountId=c['account_id'], AssetBundleExportJobId=job_id),
+            notify=status_text.text,
+        )
+
         progress_bar.progress(50)
         status_text.text("Downloading asset bundle...")
         
@@ -158,16 +130,14 @@ def export_dashboard(dashboard_id, dashboard_name):
             st.error("No download URL available")
             return False
         
-        r = requests.get(url)
+        r = requests.get(url, timeout=(5, 60))
         r.raise_for_status()
         
         progress_bar.progress(75)
         status_text.text("Uploading to S3...")
         
-        sanitized_name = sanitize_name(dashboard_name)
-        timestamp = datetime.now().strftime('%Y%m%d')
-        s3_key = f"{c['s3_prefix']}{sanitized_name}_{timestamp}.qs"
-        
+        s3_key = backup_key(c['s3_prefix'], dashboard_name)
+
         clients['s3'].upload_fileobj(
             io.BytesIO(r.content),
             c['s3_bucket'],
@@ -185,12 +155,13 @@ def export_dashboard(dashboard_id, dashboard_name):
 def restore_asset(s3_uri):
     clients = get_clients()
     c = cfg()
-    job_id = str(int(time.time()))
+    job_id = str(uuid.uuid4())
     
     progress_bar = st.progress(0)
     status_text = st.empty()
     
     try:
+        validate_s3_uri(s3_uri)
         status_text.text("Starting restoration job...")
         clients['quicksight'].start_asset_bundle_import_job(
             AwsAccountId=c['account_id'],
@@ -201,37 +172,12 @@ def restore_asset(s3_uri):
         progress_bar.progress(25)
         status_text.text("Waiting for restoration to complete...")
         
-        wait_time = 5
-        max_wait = 60
-        while True:
-            try:
-                response = clients['quicksight'].describe_asset_bundle_import_job(
-                    AwsAccountId=c['account_id'],
-                    AssetBundleImportJobId=job_id
-                )
-                
-                status = response['JobStatus']
-                if status == 'FAILED':
-                    st.error("Restoration job failed!")
-                    if 'Errors' in response:
-                        for error in response['Errors']:
-                            st.error(f"Error: {error}")
-                    return False
-                elif status == 'SUCCESSFUL':
-                    break
-                elif status in ['QUEUED', 'IN_PROGRESS']:
-                    status_text.text(f"Job status: {status}... waiting {wait_time}s")
-                    time.sleep(wait_time)
-                    wait_time = min(wait_time * 1.5, max_wait)
-                    
-            except Exception as api_error:
-                if 'ThrottlingException' in str(api_error):
-                    status_text.text(f"Rate limited, waiting {wait_time}s...")
-                    time.sleep(wait_time)
-                    wait_time = min(wait_time * 2, max_wait)
-                else:
-                    raise api_error
-            
+        response = wait_for_job(
+            lambda: clients['quicksight'].describe_asset_bundle_import_job(
+                AwsAccountId=c['account_id'], AssetBundleImportJobId=job_id),
+            notify=status_text.text,
+        )
+
         progress_bar.progress(100)
         status_text.text("✅ Restoration completed successfully!")
         return True
@@ -300,6 +246,13 @@ with st.sidebar:
         use_container_width=True,
     )
 
+# Validate before creating clients or making discovery requests.
+try:
+    validate_config(cfg())
+except (ValueError, TypeError) as error:
+    st.info(f"Configure the application to continue: {error}")
+    st.stop()
+
 # Main tabs
 tab1, tab2 = st.tabs(["📤 Backup Dashboards", "📥 Restore Assets"])
 
@@ -349,6 +302,8 @@ with tab2:
     
     backups = list_s3_backups()
     
+    restore_confirmed = st.checkbox("I understand restoration can change existing QuickSight resources.")
+
     if backups:
         selected_backup = st.selectbox(
             "Select backup to restore:",
@@ -356,7 +311,7 @@ with tab2:
             format_func=lambda x: f"{x['name']} ({x['modified'].strftime('%Y-%m-%d %H:%M')})"
         )
         
-        if selected_backup and st.button("🔄 Restore Selected Backup"):
+        if selected_backup and st.button("🔄 Restore Selected Backup", disabled=not restore_confirmed):
             s3_uri = f"s3://{cfg()['s3_bucket']}/{selected_backup['key']}"
             with st.spinner("Restoring asset..."):
                 success = restore_asset(s3_uri)
@@ -375,7 +330,7 @@ with tab2:
         help="Enter the full S3 URI of the asset bundle to restore"
     )
     
-    if s3_uri and st.button("🔄 Restore from URI"):
+    if s3_uri and st.button("🔄 Restore from URI", disabled=not restore_confirmed):
         try:
             parsed = urlparse(s3_uri)
             if parsed.scheme != 's3':
